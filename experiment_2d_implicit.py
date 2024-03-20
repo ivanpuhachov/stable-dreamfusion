@@ -6,35 +6,39 @@ import os
 from tqdm import tqdm
 from nerf.sd import StableDiffusion, seed_everything
 from experiment_single_rgb import get_cosine_schedule_with_warmup
+from encoding import get_encoder
 
 
 class Implicit2D(torch.nn.Module):
     def __init__(self):
         super().__init__()
         n_hidden_neurons = 256
+        self.encoder, self.enc_dim = get_encoder('frequency_torch', input_dim=2, log2_hashmap_size=4, desired_resolution=256)
         self.mlp = torch.nn.Sequential(
-            torch.nn.Linear(2, n_hidden_neurons),
+            torch.nn.Linear(self.enc_dim, n_hidden_neurons),
+            torch.nn.Softplus(beta=10.0),
+            torch.nn.Linear(n_hidden_neurons, n_hidden_neurons),
             torch.nn.Softplus(beta=10.0),
             torch.nn.Linear(n_hidden_neurons, n_hidden_neurons),
             torch.nn.Softplus(beta=10.0),
             torch.nn.Linear(n_hidden_neurons, 3),
-            # torch.nn.Softplus(beta=10.0),
-            # torch.nn.Linear(n_hidden_neurons, 3),
             # torch.nn.Sigmoid(),
             # To ensure that the colors correctly range between [0-1],
             # the layer is terminated with a sigmoid layer.
         )
 
     def forward(self, x):
+        x = self.encoder(x)
         return self.mlp(x)
 
-    def render(self, size=64, device="cuda"):
+    def render(self, size=64, clip=False, device="cuda"):
         xs = torch.linspace(-1, 1, steps=size)
         ys = torch.linspace(-1, 1, steps=size)
         x, y = torch.meshgrid(xs, ys, indexing='xy')
         xy = torch.stack([x, y], dim=2).view(-1, 2).to(device)
         rgb = self.forward(xy).view(size, size, 3)
-        # rgb = torch.clip(rgb, 0.0, 1.0)
+        if clip:
+            rgb = torch.clip(rgb, 0.0, 1.0)
         return rgb
 
 
@@ -83,7 +87,7 @@ class Implicit2DTrainer:
             if (i_step % save_every == (save_every-1)) or (i_step == 0) or (i_step == n_steps):
                 frames.append((output.detach().cpu().numpy() * 255).astype(np.uint8))
 
-        self.save_frames_as_gif("trial/demo.gif", frames)
+        self.save_frames_as_gif("demo.gif", frames)
         plt.figure()
         plt.imshow(frames[-1])
         plt.show()
@@ -92,7 +96,7 @@ class Implicit2DTrainer:
             self,
             prompt="pineapple",
             n_steps=500,
-            save_every=5,
+            save_every=10,
     ):
         frames = []
         guidance = StableDiffusion(self.device)
@@ -113,7 +117,7 @@ class Implicit2DTrainer:
         )
         for i_step in (pbar := tqdm(range(n_steps))):
             optimizer.zero_grad()
-            output = self.model.render(size=128)
+            output = self.model.render(size=128, clip=True)
             guidance.train_step(text_embeddings, output.unsqueeze(0).permute(0,3,1,2), guidance_scale=100)
             # guidance.train_step(text_embeddings, rgb, guidance_scale=100)
             optimizer.step()
@@ -141,8 +145,10 @@ def test_implicit_2d_trainer():
     gt_image[height // 2:, width // 2:, :] = torch.tensor([0.0, 0.0, 1.0])
     mymodel = Implicit2D()
     mytrainer = Implicit2DTrainer(model=mymodel)
-    # mytrainer.fit_image(image=gt_image, n_steps=800, save_every=20)
+    # mytrainer.fit_image(image=gt_image, n_steps=1800, save_every=20)
     mytrainer.optimize_sds()
+    # print(mytrainer.model.enc_dim)
+    # print(mymodel.encoder)
 
 
 if __name__ == '__main__':
